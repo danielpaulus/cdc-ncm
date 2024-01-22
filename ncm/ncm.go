@@ -6,24 +6,41 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
+
+	"github.com/songgao/packets/ethernet"
 )
 
-type header struct {
+/*
+NCM allows device and host to efficiently transfer one or more Ethernet frames
+using a single USB trans- fer.
+The USB transfer is formatted as a NCM Transfer Block (NTB).
+*/
+type ntbHeader struct {
 	Signature   uint32
 	HeaderLen   uint16
 	SequenceNum uint16
 	BlockLen    uint16
-	NpdIndex    uint16
+	NdpIndex    uint16
 }
 
-func (h header) String() string {
-	return fmt.Sprintf("Header[len=%d, seq=%d, blockLen=%d]", h.HeaderLen, h.SequenceNum, h.BlockLen)
+func (h ntbHeader) String() string {
+	buf := make([]byte, 4)
+	// Convert uint32 to bytes and store it in buf
+	binary.LittleEndian.PutUint32(buf, h.Signature)
+	return fmt.Sprintf("NTB-Header[sig:%s sighex:%x len=%d, seq=%d, blockLen=%d, NDPIndex= %d]", string(buf), h.Signature, h.HeaderLen, h.SequenceNum, h.BlockLen, h.NdpIndex)
 }
 
 type datagramPointerHeader struct {
 	Signature    uint32
 	Length       uint16
 	NextNpdIndex uint16
+}
+
+const datagramPointerHeaderSignature = 0x304D434E
+
+func (d datagramPointerHeader) IsValid() bool {
+	return d.Signature == datagramPointerHeaderSignature
 }
 
 func (d datagramPointerHeader) String() string {
@@ -43,7 +60,6 @@ type NcmWrapper struct {
 }
 
 const headerSignature = 0x484D434E
-const datagramPointerHeaderSignature = 0x304D434E
 
 func NewWrapper(targetReader io.Reader, targetWriter io.Writer) *NcmWrapper {
 	return &NcmWrapper{
@@ -54,93 +70,136 @@ func NewWrapper(targetReader io.Reader, targetWriter io.Writer) *NcmWrapper {
 	}
 }
 
-func (r *NcmWrapper) Read(p []byte) (int, error) {
-	if r.buf.Len() >= len(p) {
-		return r.buf.Read(p)
+const EtherHeaderLength = 14
+const IPv6 = 0x86DD
+
+func EthernetParser(datagram []byte) string {
+	frame := ethernet.Frame(datagram)
+	prot := ""
+	if ethernet.IPv6 == frame.Ethertype() {
+		prot = "(IPv6)"
 	}
-	var h header
+	return fmt.Sprintf("Ethernet(MAC) - dest:%x source:%x etherType:%x%s",
+		frame.Destination(), frame.Source(), frame.Ethertype(), prot)
+
+}
+
+const UDP = 0x11
+
+// https://en.wikipedia.org/wiki/List_of_IP_protocol_numbers
+func IPv6Parser(packet []byte) string {
+	length := binary.BigEndian.Uint16(packet[4:6])
+	sourceAddressB := packet[8:24]
+	destAddressB := packet[24:40]
+
+	var hexStrings []string
+	for _, b := range sourceAddressB {
+		hexStrings = append(hexStrings, fmt.Sprintf("%02X", b))
+	}
+
+	sourceIP := strings.Join(hexStrings, ":")
+
+	var hexStrings1 []string
+	for _, b := range destAddressB {
+		hexStrings1 = append(hexStrings1, fmt.Sprintf("%02X", b))
+	}
+	destIP := strings.Join(hexStrings1, ":")
+
+	protocol := packet[6]
+	prot := ""
+	if protocol == UDP {
+		prot = "UDP"
+	} else {
+		prot = fmt.Sprintf("PROTOCOL:%d", protocol)
+	}
+	return fmt.Sprintf("IP len:%d transport:%s source:%s dest:%s", length, prot, sourceIP, destIP)
+}
+
+func (r *NcmWrapper) Read(p []byte) (int, error) {
+
+	var h ntbHeader
 	err := binary.Read(r.targetReader, binary.LittleEndian, &h)
 	if err != nil {
 		return 0, err
 	}
 	if h.Signature != headerSignature {
-		return 0, fmt.Errorf("wrong header signature")
-	}
+		fmt.Printf("%x%x%x%x%x\n", h.Signature, h.HeaderLen, h.SequenceNum, h.BlockLen, h.NdpIndex)
+		test := make([]byte, 4000)
+		n, err := r.targetReader.Read(test)
 
+		if err == nil {
+			fmt.Printf("%x\n", test)
+		} else {
+			println(err)
+		}
+		test = make([]byte, 4000)
+		n, err = r.targetReader.Read(test)
+
+		if err == nil {
+			fmt.Printf("%x\n", test)
+		} else {
+			println(err)
+		}
+		return 0, fmt.Errorf("wrong header signature: %x, read %d additional", h.Signature, n)
+	}
+	fmt.Printf("%s, read block: %d\n", h.String(), h.BlockLen-h.HeaderLen)
+
+	//read the entire block, minus the header
+	ncmTransferBlock := make([]byte, h.BlockLen)
+
+	//later we need many indexes, so we pad the header length with 0s for easier calculations
+	b, err := io.ReadFull(r.targetReader, ncmTransferBlock[h.HeaderLen:])
+	if err != nil {
+		return 0, fmt.Errorf("reading block failed %w", err)
+	}
+	//fmt.Printf("block: %x\n", ncmTransferBlock)
+
+	offset := h.NdpIndex
 	var dh datagramPointerHeader
-	err = binary.Read(r.targetReader, binary.LittleEndian, &dh)
+	err = binary.Read(bytes.NewReader(ncmTransferBlock[offset:]), binary.LittleEndian, &dh)
 	if err != nil {
 		return 0, err
 	}
-	if dh.Signature != datagramPointerHeaderSignature {
-		return 0, fmt.Errorf("wrong datagram pointer signature")
+	if !dh.IsValid() {
+		return 0, fmt.Errorf("datagrampointerheader invalid signature:%x", dh.Signature)
 	}
-
-	if dh.Length == 0x8c {
-		slog.Warn("change datagram size")
-		dh.Length = 0x3c
+	fmt.Printf("datagramPointerHeader: %s\n", dh.String())
+	if dh.NextNpdIndex != 0 {
+		//if this happens, we gotta create a loop here to extract all dhs, starting with the next index until
+		//nextndpindex==0
+		panic("not implemented :-)")
 	}
-
-	slog.Info("Frame read", slog.String("header", h.String()), (slog.String("dgP", dh.String())))
-
-	datagrams := make([]byte, dh.Length-8)
-	_, err = r.targetReader.Read(datagrams)
-	if err != nil {
-		return 0, err
-	}
-	skipped, err := io.CopyN(io.Discard, r.targetReader, 2)
-	if err != nil {
-		return 0, err
-	}
-	if skipped != 2 {
-		return 0, fmt.Errorf("could not skip 2 bytes")
-	}
-
-	totalHeaderLength := h.HeaderLen + dh.Length + 2
-	payloadLength := int(h.BlockLen - totalHeaderLength)
-
-	payload := make([]byte, h.BlockLen-totalHeaderLength)
-	n, err := r.targetReader.Read(payload)
-	if err != nil {
-		return 0, err
-	}
-	if n != payloadLength {
-		return 0, fmt.Errorf("expected %d bytes, but only read %d", payloadLength, n)
-	}
-
-	outOffset := 0
-
-	datagramReader := bytes.NewReader(datagrams)
-	for i := 0; i < len(datagrams)/4; i++ {
-		var d datagram
-		err = binary.Read(datagramReader, binary.LittleEndian, &d)
-		if err != nil {
-			return 0, err
+	datagramPointers := ncmTransferBlock[offset+8:]
+	pointer := 0
+	for {
+		dgIndex := binary.LittleEndian.Uint16(datagramPointers[pointer:])
+		dgLen := binary.LittleEndian.Uint16(datagramPointers[pointer+2:])
+		if dgLen == 0 {
+			break
 		}
-		if d.Length == 0 {
-			continue
+		slog.Debug("datagram", "index", dgIndex, "length", dgLen)
+		datagram := ncmTransferBlock[dgIndex : dgIndex+dgLen]
+		fmt.Printf("%s\n%s \n", IPv6Parser(datagram[EtherHeaderLength:]), EthernetParser(datagram))
+
+		pointer += 4
+		if pointer > int(dh.Length-8) {
+			slog.Error("datagramheaderpointer out of bounds")
+			break
 		}
-		offset := d.Index - totalHeaderLength
-		slog.Info("read datagram", slog.Int64("offset", int64(offset)), slog.Int64("len", int64(d.Length)))
-		_, err = r.buf.Write(payload[offset:d.Length])
-		if err != nil {
-			return 0, fmt.Errorf("could not copy datagram into buffer. %w", err)
-		}
-		outOffset += int(d.Length)
 	}
 
-	return r.buf.Read(p)
-	//return outOffset, nil
+	return b, nil
+
 }
 
 func (r *NcmWrapper) Write(p []byte) (n int, err error) {
-
-	h := header{
+	fmt.Printf("write! %x", p)
+	h := ntbHeader{
 		Signature:   headerSignature,
 		HeaderLen:   12,
 		SequenceNum: r.sequenceNum,
 		BlockLen:    uint16(len(p) + 12 + 8 + 8 + 2),
-		NpdIndex:    12,
+		NdpIndex:    12,
 	}
 
 	dh := datagramPointerHeader{

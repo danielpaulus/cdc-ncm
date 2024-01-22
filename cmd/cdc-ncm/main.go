@@ -1,25 +1,26 @@
 package main
 
 import (
-	"encoding/hex"
-	"github.com/google/gousb"
-	"github.com/songgao/water"
 	"io"
 	"ios-usb-config/ncm"
 	"log"
 	"log/slog"
 	"time"
+
+	"github.com/google/gousb"
+	"github.com/songgao/water"
 )
 
 func main() {
 	ctx := gousb.NewContext()
 	devices, err := ctx.OpenDevices(func(desc *gousb.DeviceDesc) bool {
-		slog.Info("found device", slog.Int64("product", int64(desc.Product)), slog.Int64("vendor", int64(desc.Vendor)))
+		//slog.Info("found device", slog.Int64("product", int64(desc.Product)), slog.Int64("vendor", int64(desc.Vendor)))
 		return desc.Vendor == 0x05ac && desc.Product == 0x12a8
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
+	slog.Info("device list", "length", len(devices))
 	for _, d := range devices {
 		handleDevice(d)
 	}
@@ -40,8 +41,10 @@ func handleDevice(device *gousb.Device) {
 		return
 	}
 	slog.Info("active config", slog.Int("active", activeConfig))
+	confLen := len(device.Desc.Configs)
+	slog.Info("available configs", "configs", device.Desc.Configs, "len", confLen)
 
-	if activeConfig != 5 {
+	if confLen != 5 {
 		_, err = device.Control(0xc0, 69, 0, 0, make([]byte, 4))
 		if err != nil {
 			slog.Error("failed sending control1", slog.Any("error", err))
@@ -65,7 +68,7 @@ func handleDevice(device *gousb.Device) {
 
 	cfg, err := device.Config(5)
 	if err != nil {
-		slog.Error("failed activating config", slog.AnyValue(err))
+		slog.Error("failed activating config", "err", slog.AnyValue(err))
 		return
 	}
 	slog.Info("got config", slog.String("config", cfg.String()))
@@ -82,12 +85,25 @@ func handleDevice(device *gousb.Device) {
 		slog.Error("failed to open interface", slog.AnyValue(err))
 		return
 	}
-	in, err := iface.InEndpoint(0x87)
+	var inEndpoint int
+	var outEndpoint int
+	for endpoint, i := range iface.Setting.Endpoints {
+		slog.Info(endpoint.String())
+		if i.Direction == gousb.EndpointDirectionIn {
+			inEndpoint = i.Number
+		}
+		if i.Direction == gousb.EndpointDirectionOut {
+			outEndpoint = i.Number
+		}
+		slog.Info(i.String())
+	}
+
+	in, err := iface.InEndpoint(inEndpoint)
 	if err != nil {
 		slog.Error("failed to get in-endpoint", slog.AnyValue(err))
 	}
 
-	out, err := iface.OutEndpoint(0x06)
+	out, err := iface.OutEndpoint(outEndpoint)
 	if err != nil {
 		slog.Error("failed to get out-endpoint", slog.AnyValue(err))
 	}
@@ -181,6 +197,6 @@ func (l loggingReader) Read(p []byte) (n int, err error) {
 	if err != nil {
 		return n, err
 	}
-	slog.Info("read", slog.String("bytes", hex.EncodeToString(p[:n])))
+	//slog.Info("read", slog.String("bytes", hex.EncodeToString(p[:n])))
 	return
 }
