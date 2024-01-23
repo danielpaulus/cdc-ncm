@@ -115,12 +115,12 @@ func IPv6Parser(packet []byte) string {
 	return fmt.Sprintf("IP len:%d transport:%s source:%s dest:%s", length, prot, sourceIP, destIP)
 }
 
-func (r *NcmWrapper) Read(p []byte) (int, error) {
-
+func (r *NcmWrapper) ReadDatagrams() ([]ethernet.Frame, error) {
+	var result []ethernet.Frame
 	var h ntbHeader
 	err := binary.Read(r.targetReader, binary.LittleEndian, &h)
 	if err != nil {
-		return 0, err
+		return result, err
 	}
 	if h.Signature != headerSignature {
 		fmt.Printf("%x%x%x%x%x\n", h.Signature, h.HeaderLen, h.SequenceNum, h.BlockLen, h.NdpIndex)
@@ -140,7 +140,7 @@ func (r *NcmWrapper) Read(p []byte) (int, error) {
 		} else {
 			println(err)
 		}
-		return 0, fmt.Errorf("wrong header signature: %x, read %d additional", h.Signature, n)
+		return result, fmt.Errorf("wrong header signature: %x, read %d additional", h.Signature, n)
 	}
 	fmt.Printf("%s, read block: %d\n", h.String(), h.BlockLen-h.HeaderLen)
 
@@ -150,7 +150,7 @@ func (r *NcmWrapper) Read(p []byte) (int, error) {
 	//later we need many indexes, so we pad the header length with 0s for easier calculations
 	b, err := io.ReadFull(r.targetReader, ncmTransferBlock[h.HeaderLen:])
 	if err != nil {
-		return 0, fmt.Errorf("reading block failed %w", err)
+		return result, fmt.Errorf("reading block failed bytes read:%d err: %w", b, err)
 	}
 	//fmt.Printf("block: %x\n", ncmTransferBlock)
 
@@ -158,10 +158,10 @@ func (r *NcmWrapper) Read(p []byte) (int, error) {
 	var dh datagramPointerHeader
 	err = binary.Read(bytes.NewReader(ncmTransferBlock[offset:]), binary.LittleEndian, &dh)
 	if err != nil {
-		return 0, err
+		return result, err
 	}
 	if !dh.IsValid() {
-		return 0, fmt.Errorf("datagrampointerheader invalid signature:%x", dh.Signature)
+		return result, fmt.Errorf("datagrampointerheader invalid signature:%x", dh.Signature)
 	}
 	fmt.Printf("datagramPointerHeader: %s\n", dh.String())
 	if dh.NextNpdIndex != 0 {
@@ -180,7 +180,7 @@ func (r *NcmWrapper) Read(p []byte) (int, error) {
 		slog.Debug("datagram", "index", dgIndex, "length", dgLen)
 		datagram := ncmTransferBlock[dgIndex : dgIndex+dgLen]
 		fmt.Printf("%s\n%s \n", IPv6Parser(datagram[EtherHeaderLength:]), EthernetParser(datagram))
-
+		result = append(result, ethernet.Frame(datagram))
 		pointer += 4
 		if pointer > int(dh.Length-8) {
 			slog.Error("datagramheaderpointer out of bounds")
@@ -188,12 +188,14 @@ func (r *NcmWrapper) Read(p []byte) (int, error) {
 		}
 	}
 
-	return b, nil
+	return result, nil
 
 }
 
+// this wants a complete ethernet.Frame on every write.
+// also it's pretty inefficient atm as it packages one frame into one NTB
+// it should work nevertheless, albeit a bit slower
 func (r *NcmWrapper) Write(p []byte) (n int, err error) {
-	fmt.Printf("write! %x", p)
 	h := ntbHeader{
 		Signature:   headerSignature,
 		HeaderLen:   12,
@@ -227,7 +229,19 @@ func (r *NcmWrapper) Write(p []byte) (n int, err error) {
 	binary.Write(buf, binary.LittleEndian, d0)
 	buf.WriteByte(0)
 	buf.WriteByte(0)
+
 	buf.Write(p)
-	r.targetWriter.Write(buf.Bytes())
-	return len(p), err
+	n, err = r.targetWriter.Write(buf.Bytes())
+	/*
+		//just for debugging
+		var tw = NewWrapper(bytes.NewReader(buf.Bytes()), io.Discard)
+		frame, err := tw.ReadDatagrams()
+		if err != nil {
+			slog.Error("failed aprsing ", "err", err)
+		} else {
+			fmt.Print("sending:")
+			fmt.Print(EthernetParser(frame[0]))
+		}*/
+
+	return n, err
 }

@@ -5,9 +5,13 @@ import (
 	"ios-usb-config/ncm"
 	"log"
 	"log/slog"
+	"os"
+	"os/exec"
+	"os/signal"
 	"time"
 
 	"github.com/google/gousb"
+	"github.com/songgao/packets/ethernet"
 	"github.com/songgao/water"
 )
 
@@ -121,6 +125,7 @@ func handleDevice(device *gousb.Device) {
 	if err != nil {
 		return
 	}
+
 	defer outStream.Close()
 
 	slog.Info("created streams")
@@ -142,7 +147,7 @@ func getEndpointDescriptions(s gousb.InterfaceSetting) (in gousb.EndpointDesc, o
 
 func createConfig(w io.Writer, r io.Reader) {
 	config := water.Config{
-		DeviceType: water.TAP,
+		DeviceType: water.TUN,
 	}
 	config.Name = "iphone"
 
@@ -150,23 +155,56 @@ func createConfig(w io.Writer, r io.Reader) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	out, err := exec.Command("/bin/sh", "-c", "sudo ip link set dev iphone up").CombinedOutput()
+	if err != nil {
+		slog.Error("failed setting up ethernet device", "err", err)
+	}
+	slog.Info("ethernet device is up:", "cmd", string(out))
 
-	inBuf := make([]byte, 4096)
-	outBuf := make([]byte, 4096)
 	wr := ncm.NewWrapper(loggingReader{r}, w)
 
 	time.Sleep(10 * time.Second)
 	slog.Info("start copying")
 
 	go func() {
-		_, err := io.CopyBuffer(wr, ifce, inBuf)
-		if err != nil {
-			slog.Error("failed to copy from iface to usb", slog.Any("error", err))
+		var frame ethernet.Frame
+		for {
+			frame.Resize(1500)
+			n, err := ifce.Read([]byte(frame))
+			if err != nil {
+				log.Fatal(err)
+			}
+			frame = frame[:n]
+			_, err = wr.Write(frame)
+			if err != nil {
+				slog.Error("failed to copy from iface to usb", slog.Any("error", err))
+				continue
+			}
+			slog.Info("write to USB ok")
 		}
+
 	}()
 
-	_, err = io.CopyBuffer(io.Discard, wr, outBuf)
-	slog.Error("failed to copy from usb to iface", slog.Any("error", err))
+	go func() {
+		for {
+			frames, err := wr.ReadDatagrams()
+			if err != nil {
+				slog.Error("failed reading datagrams with err", err)
+			}
+			for _, frame := range frames {
+				_, err := ifce.Write(frame)
+				if err != nil {
+					slog.Error("failed sending frame to virtual device", "err", err)
+				}
+			}
+		}
+	}()
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	<-c
+	//_, err = io.CopyBuffer(io.Discard, wr, outBuf)
+
+	//slog.Error("failed to copy from usb to iface", slog.Any("error", err))
 	//
 	//for {
 	//	n, err := ifce.Read(inBuf)
