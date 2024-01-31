@@ -147,7 +147,7 @@ func getEndpointDescriptions(s gousb.InterfaceSetting) (in gousb.EndpointDesc, o
 
 func createConfig(w io.Writer, r io.Reader) {
 	config := water.Config{
-		DeviceType: water.TUN,
+		DeviceType: water.TAP,
 	}
 	config.Name = "iphone"
 
