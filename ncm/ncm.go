@@ -196,11 +196,13 @@ func (r *NcmWrapper) ReadDatagrams() ([]ethernet.Frame, error) {
 // also it's pretty inefficient atm as it packages one frame into one NTB
 // it should work nevertheless, albeit a bit slower
 func (r *NcmWrapper) Write(p []byte) (n int, err error) {
+	blocklength := len(p) + 12 + 8 + 8 + 2
+	block := make([]byte, blocklength)
 	h := ntbHeader{
 		Signature:   headerSignature,
 		HeaderLen:   12,
 		SequenceNum: r.sequenceNum,
-		BlockLen:    uint16(len(p) + 12 + 8 + 8 + 2),
+		BlockLen:    uint16(blocklength),
 		NdpIndex:    12,
 	}
 
@@ -212,7 +214,8 @@ func (r *NcmWrapper) Write(p []byte) (n int, err error) {
 
 	r.sequenceNum++
 
-	buf := bytes.NewBuffer(nil)
+	buf := bytes.NewBuffer(block)
+	buf.Reset()
 
 	binary.Write(buf, binary.LittleEndian, h)
 	binary.Write(buf, binary.LittleEndian, dh)
@@ -231,7 +234,9 @@ func (r *NcmWrapper) Write(p []byte) (n int, err error) {
 	buf.WriteByte(0)
 
 	buf.Write(p)
-	n, err = r.targetWriter.Write(buf.Bytes())
+	block = buf.Bytes()
+	n, err = r.targetWriter.Write(block)
+	fmt.Printf("%x\n", block)
 	/*
 		//just for debugging
 		var tw = NewWrapper(bytes.NewReader(buf.Bytes()), io.Discard)

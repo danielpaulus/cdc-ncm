@@ -113,7 +113,7 @@ func handleDevice(device *gousb.Device) {
 	}
 	slog.Info("claimed interfaces")
 
-	inDesc, outDesc := getEndpointDescriptions(cfg.Desc.Interfaces[5].AltSettings[1])
+	inDesc, _ := getEndpointDescriptions(cfg.Desc.Interfaces[5].AltSettings[1])
 
 	inStream, err := in.NewStream(inDesc.MaxPacketSize*3, 1)
 	if err != nil {
@@ -121,16 +121,16 @@ func handleDevice(device *gousb.Device) {
 	}
 	defer inStream.Close()
 
-	outStream, err := out.NewStream(outDesc.MaxPacketSize*3, 1)
-	if err != nil {
-		return
-	}
+	/*	outStream, err := out.NewStream(outDesc.MaxPacketSize*3, 1)
+		if err != nil {
+			return
+		}
 
-	defer outStream.Close()
-
+		defer outStream.Close()
+	*/
 	slog.Info("created streams")
 
-	createConfig(outStream, inStream)
+	createConfig(out, inStream)
 }
 
 func getEndpointDescriptions(s gousb.InterfaceSetting) (in gousb.EndpointDesc, out gousb.EndpointDesc) {
